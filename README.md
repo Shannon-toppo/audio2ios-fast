@@ -1,7 +1,7 @@
-# audioiosfast
+# audio2ios-fast
 
 Windowsのシステム音声をリアルタイムでiPhoneのSafariに飛ばして再生するツールです。
-[audiotoios](../audiotoios) のPythonサーバーを **Rust** に書き換えた高速版です。
+[../audio2ios](https://github.com/Shannon-toppo/audio2ios) のPythonサーバーを **Rust** に書き換えた高速版です。
 
 RustサーバーがWASAPIループバックで音声をキャプチャし、生PCMをWebSocketでLAN配信。
 SafariクライアントはAudioWorkletで再生します（iOS 18対策のScriptProcessorNodeフォールバック付き）。
