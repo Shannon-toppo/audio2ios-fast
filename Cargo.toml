@@ -1,0 +1,20 @@
+[package]
+name = "audioiosfast"
+version = "0.1.0"
+edition = "2021"
+description = "Real-time Windows system audio to iPhone Safari streaming over LAN (Rust rewrite of audiotoios)"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["fs"] }
+wasapi = "0.23"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

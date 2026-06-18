@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Audio Stream</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #0a0a0a;
+    color: #e0e0e0;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #startBtn {
+    font-size: 18px;
+    padding: 16px 48px;
+    border: none;
+    border-radius: 12px;
+    background: #2563eb;
+    color: #fff;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  #startBtn:active { opacity: 0.7; }
+  #startBtn:disabled { background: #333; color: #666; cursor: default; }
+  #status {
+    margin-top: 20px;
+    font-size: 14px;
+    color: #888;
+    text-align: center;
+    min-height: 40px;
+  }
+  #stats {
+    margin-top: 12px;
+    font-size: 12px;
+    color: #555;
+    font-variant-numeric: tabular-nums;
+  }
+  #fallbackBtn {
+    display: none;
+    margin-top: 16px;
+    font-size: 14px;
+    padding: 10px 24px;
+    border: 1px solid #555;
+    border-radius: 8px;
+    background: transparent;
+    color: #aaa;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<button id="startBtn" disabled>読み込み中...</button>
+<div id="status"></div>
+<div id="stats"></div>
+<button id="fallbackBtn">互換モードで再生</button>
+
+<script src="nosleep.js"></script>
+<script>
+const statusEl = document.getElementById("status");
+const statsEl = document.getElementById("stats");
+const startBtn = document.getElementById("startBtn");
+const fallbackBtn = document.getElementById("fallbackBtn");
+
+let ws, audioCtx, workletNode, scriptNode;
+let wakeLock = null;
+let noSleep = new NoSleep();
+let meta = null;
+let ready = false;
+let useFallback = false;
+let fallbackBufCount = 0;
+let fallbackRead = 0;
+let fallbackWrite = 0;
+let fallbackPrimed = false;
+let fallbackArr, fallbackArrR;
+const FALLBACK_SIZE = 19200;     // 400ms ring (matches the AudioWorklet path)
+const FALLBACK_PREROLL = 7200;   // 150ms buffered before playback starts
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+// Keep the iPhone screen from sleeping during playback.
+//
+// The standard Screen Wake Lock API only works in a *secure context* (HTTPS or
+// localhost). This app is served over plain HTTP on the LAN, so navigator.wakeLock
+// is undefined here — we fall back to NoSleep.js, which keeps the screen awake by
+// playing a tiny hidden looping video (the only method that works on iOS over HTTP).
+// NoSleep.enable() MUST run inside a user gesture, so it's called from the tap
+// handler (see startBtn click), not here.
+async function requestWakeLock() {
+  if ("wakeLock" in navigator) {
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    } catch (err) {
+      console.warn("WakeLock request failed:", err);
+    }
+  }
+}
+
+async function releaseWakeLock() {
+  if (wakeLock) {
+    try { await wakeLock.release(); } catch (_) {}
+    wakeLock = null;
+  }
+  try { noSleep.disable(); } catch (_) {}
+}
+
+document.addEventListener("visibilitychange", () => {
+  // The OS auto-releases the Wake Lock when the tab is hidden; re-acquire on
+  // return if still connected. (NoSleep re-arms itself automatically.)
+  if (document.visibilityState === "visible" &&
+      ws && ws.readyState === WebSocket.OPEN) {
+    requestWakeLock();
+  }
+});
+
+// Phase 1: Pre-fetch metadata and set up AudioContext + Worklet on page load.
+// AudioContext starts suspended — Safari allows this without a gesture.
+async function preInit() {
+  try {
+    const resp = await fetch("/meta");
+    meta = await resp.json();
+    audioCtx = new AudioContext({ sampleRate: meta.sampleRate });
+    await audioCtx.audioWorklet.addModule("pcm-worklet.js");
+    workletNode = new AudioWorkletNode(audioCtx, "pcm-worklet", {
+      outputChannelCount: [meta.channels],
+    });
+    workletNode.port.onmessage = (e) => {
+      const d = e.data;
+      statsEl.textContent = `buf: ${d.bufferedFrames} frames | underrun: ${d.underruns} | overflow: ${d.overflows}`;
+    };
+    workletNode.connect(audioCtx.destination);
+    ready = true;
+  } catch (err) {
+    console.warn("AudioWorklet pre-init failed, will use fallback:", err);
+    if (!audioCtx) {
+      audioCtx = new AudioContext({ sampleRate: meta ? meta.sampleRate : 48000 });
+    }
+    useFallback = true;
+    ready = true;
+  }
+  startBtn.disabled = false;
+  startBtn.textContent = "再生開始";
+}
+preInit();
+
+// Phase 2: User taps — resume AudioContext (gesture required) and connect WebSocket.
+startBtn.addEventListener("click", () => {
+  if (!ready) return;
+  startBtn.disabled = true;
+  startBtn.textContent = "接続中...";
+  fallbackBtn.style.display = "none";
+  statsEl.textContent = "";
+
+  audioCtx.resume();
+
+  // Must run inside this gesture to satisfy iOS autoplay policy for the
+  // hidden keep-awake video.
+  try { noSleep.enable(); } catch (err) { console.warn("NoSleep enable failed:", err); }
+
+  if (useFallback) initFallback();
+
+  connectWS();
+});
+
+function connectWS() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    setStatus("バッファリング中...");
+    requestWakeLock();
+  };
+
+  ws.onmessage = (e) => {
+    if (typeof e.data === "string") return;
+    feedAudio(e.data);
+  };
+
+  ws.onclose = () => {
+    setStatus("切断されました — タップして再接続");
+    startBtn.disabled = false;
+    startBtn.textContent = "再接続";
+    releaseWakeLock();
+  };
+
+  ws.onerror = () => ws.close();
+
+  setTimeout(() => {
+    if (!useFallback) {
+      setStatus("再生中");
+      fallbackBtn.style.display = "inline-block";
+    }
+  }, 1500);
+}
+
+function int16ToFloat32(buf) {
+  const view = new Int16Array(buf);
+  const out = new Float32Array(view.length);
+  for (let i = 0; i < view.length; i++) {
+    out[i] = view[i] / 32768;
+  }
+  return out;
+}
+
+function feedAudio(arrayBuf) {
+  const f32 = int16ToFloat32(arrayBuf);
+
+  if (!useFallback && workletNode) {
+    workletNode.port.postMessage({ audio: f32 }, [f32.buffer]);
+    return;
+  }
+
+  if (useFallback && fallbackArr) {
+    const frames = f32.length / meta.channels;
+    for (let i = 0; i < frames; i++) {
+      fallbackArr[fallbackWrite] = f32[i * meta.channels];
+      fallbackArrR[fallbackWrite] = meta.channels > 1 ? f32[i * meta.channels + 1] : f32[i * meta.channels];
+      fallbackWrite = (fallbackWrite + 1) % FALLBACK_SIZE;
+    }
+    fallbackBufCount += frames;
+    // Same overflow handling as the AudioWorklet ring buffer: on overflow the
+    // write pointer has overwritten unread samples, so advance the read pointer
+    // past the dropped frames to keep (write - read) === bufCount. Otherwise the
+    // read pointer crosses the write seam and audio progressively corrupts.
+    if (fallbackBufCount > FALLBACK_SIZE) {
+      const overflow = fallbackBufCount - FALLBACK_SIZE;
+      fallbackRead = (fallbackRead + overflow) % FALLBACK_SIZE;
+      fallbackBufCount = FALLBACK_SIZE;
+    }
+  }
+}
+
+function initFallback() {
+  fallbackArr = new Float32Array(FALLBACK_SIZE);
+  fallbackArrR = new Float32Array(FALLBACK_SIZE);
+  fallbackRead = 0;
+  fallbackWrite = 0;
+  fallbackBufCount = 0;
+  fallbackPrimed = false;
+
+  const bufSize = 2048;
+  scriptNode = audioCtx.createScriptProcessor(bufSize, 0, meta.channels);
+  scriptNode.onaudioprocess = (e) => {
+    const outL = e.outputBuffer.getChannelData(0);
+    const outR = meta.channels > 1 ? e.outputBuffer.getChannelData(1) : null;
+    const needed = outL.length;
+
+    // Build up the preRoll cushion before starting, and rebuild it after any
+    // underrun, instead of resuming the instant a single block is available.
+    if (!fallbackPrimed) {
+      if (fallbackBufCount >= FALLBACK_PREROLL) {
+        fallbackPrimed = true;
+      } else {
+        outL.fill(0);
+        if (outR) outR.fill(0);
+        return;
+      }
+    }
+
+    if (fallbackBufCount < needed) {
+      outL.fill(0);
+      if (outR) outR.fill(0);
+      fallbackPrimed = false;
+      return;
+    }
+    for (let i = 0; i < needed; i++) {
+      outL[i] = fallbackArr[fallbackRead];
+      if (outR) outR[i] = fallbackArrR[fallbackRead];
+      fallbackRead = (fallbackRead + 1) % FALLBACK_SIZE;
+    }
+    fallbackBufCount -= needed;
+  };
+  scriptNode.connect(audioCtx.destination);
+  setStatus("再生中（互換モード）");
+  fallbackBtn.style.display = "none";
+}
+
+fallbackBtn.addEventListener("click", () => {
+  useFallback = true;
+  if (workletNode) { workletNode.disconnect(); workletNode = null; }
+  initFallback();
+});
+</script>
+</body>
+</html>
