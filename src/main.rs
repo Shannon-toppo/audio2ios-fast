@@ -11,7 +11,7 @@
 //! ```
 
 use std::collections::VecDeque;
-use std::net::UdpSocket;
+use std::net::{IpAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -19,9 +19,11 @@ use anyhow::{anyhow, Result};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Request, State,
     },
-    response::{IntoResponse, Json},
+    http::{header, HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Json, Response},
     routing::get,
     Router,
 };
@@ -147,6 +149,9 @@ async fn serve(state: AppState) -> Result<()> {
         .route("/ws", get(ws_handler))
         // ServeDir serves index.html for "/" and the JS assets for everything else.
         .fallback_service(ServeDir::new(&static_dir))
+        // Applies to every route and the fallback, so /meta and the static files
+        // are covered too.
+        .layer(middleware::from_fn(reject_dns_rebinding))
         .with_state(state);
 
     let port: u16 = std::env::var("PORT")
@@ -167,8 +172,63 @@ async fn meta_handler(State(state): State<AppState>) -> impl IntoResponse {
     Json(state.meta)
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if !origin_matches_host(&headers) {
+        return (StatusCode::FORBIDDEN, "cross-origin WebSocket rejected").into_response();
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, state))
+        .into_response()
+}
+
+/// The same-origin policy does **not** cover WebSockets: a browser will open
+/// `ws://` to any host from any page, and no CORS preflight stands in the way.
+/// Without this check, any web page the user happens to visit could connect to
+/// `ws://<lan-ip>:8080/ws` and listen to this PC's audio (cross-site WebSocket
+/// hijacking) — the LAN address is cheap to find by scanning from JS.
+///
+/// Our own client is served by this very server, so the `Origin` it sends always
+/// has the same authority as the request's `Host`.
+fn origin_matches_host(headers: &HeaderMap) -> bool {
+    let Some(host) = header_str(headers, header::HOST) else {
+        return false;
+    };
+    match header_str(headers, header::ORIGIN) {
+        Some(origin) => origin.split_once("://").is_some_and(|(_, auth)| auth == host),
+        // No Origin at all means a non-browser client (websocat, a script). The
+        // threat this guards against is specifically a browser being weaponised,
+        // and browsers always send Origin, so allowing this does not weaken the
+        // check. Return false instead to permit browsers only.
+        None => true,
+    }
+}
+
+/// A DNS-rebinding attack has to reach us through a *hostname* — a name the
+/// attacker controls, re-pointed at the LAN address, which is what makes the
+/// browser treat their page as our origin. The real client is always reached by
+/// raw IP or localhost, so refusing names costs nothing and closes that door for
+/// every route, not just the WebSocket.
+async fn reject_dns_rebinding(req: Request, next: Next) -> Response {
+    let literal = match header_str(req.headers(), header::HOST) {
+        Some(host) => {
+            let name = host.rsplit_once(':').map_or(host, |(name, _)| name);
+            // Strip the brackets of an IPv6 literal ("[::1]:8080").
+            let name = name.trim_start_matches('[').trim_end_matches(']');
+            name == "localhost" || name.parse::<IpAddr>().is_ok()
+        }
+        None => false,
+    };
+    if !literal {
+        return (StatusCode::FORBIDDEN, "host must be an IP address").into_response();
+    }
+    next.run(req).await
+}
+
+fn header_str(headers: &HeaderMap, name: header::HeaderName) -> Option<&str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {

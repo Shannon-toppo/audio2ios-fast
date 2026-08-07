@@ -46,6 +46,13 @@ iPhone Safari ← AudioWorklet (ring buffer, preroll) ← Int16→Float32 ← We
   dropped chunks and keep streaming (PCM tolerates gaps; this is the back-pressure policy).
 - `GET /meta` returns JSON config; `GET /ws` upgrades to WebSocket and first sends the meta JSON as
   a text frame (parity with Python; the client ignores it). `static/` is served via `ServeDir`.
+- **Browser-origin guards** (no auth beyond this — LAN peers are trusted by design):
+  `origin_matches_host()` rejects a `/ws` handshake whose `Origin` authority differs from `Host`,
+  because the same-origin policy does not cover WebSockets and any visited page could otherwise
+  stream this PC's audio. A missing `Origin` (non-browser client) is allowed. The
+  `reject_dns_rebinding` middleware additionally requires `Host` to be an IP literal or
+  `localhost` on **every** route, since a rebinding attack needs a hostname to work. The client
+  builds its URL from `location.host`, so both checks are transparent to it.
 
 ### Client (static/index.html + static/pcm-worklet.js)
 Near-identical to the Python project (see the wake-lock note above). The full client write-up
