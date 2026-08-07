@@ -72,6 +72,7 @@ const fallbackBtn = document.getElementById("fallbackBtn");
 let ws, audioCtx, workletNode, scriptNode;
 let wakeLock = null;
 let noSleep = new NoSleep();
+let keepAwakeWanted = false;
 let meta = null;
 let ready = false;
 let useFallback = false;
@@ -91,20 +92,58 @@ function setStatus(msg) { statusEl.textContent = msg; }
 // localhost). This app is served over plain HTTP on the LAN, so navigator.wakeLock
 // is undefined here — we fall back to NoSleep.js, which keeps the screen awake by
 // playing a tiny hidden looping video (the only method that works on iOS over HTTP).
-// NoSleep.enable() MUST run inside a user gesture, so it's called from the tap
+// NoSleep.enable() MUST run inside a user gesture, so it's first called from the tap
 // handler (see startBtn click), not here.
+
+// NoSleep v0.12.0 creates its keep-awake <video> but never attaches it to the DOM.
+// Modern iOS Safari won't reliably load metadata for / inhibit auto-lock from a
+// detached <video>, so play() rejects or the screen still sleeps. Attach it here
+// (inline + 1px invisible) so it behaves as a real, playing video element.
+//
+// NOTE: intentionally NOT muted — NoSleep's embedded track is silent, and an
+// audibly-playing video is what reliably inhibits the iOS idle timer across
+// versions. (A muted video does not hold off auto-lock on some iOS releases.)
+const _noSleepVideo = noSleep.noSleepVideo;
+if (_noSleepVideo && !_noSleepVideo.isConnected) {
+  _noSleepVideo.setAttribute("playsinline", "");
+  _noSleepVideo.setAttribute("webkit-playsinline", "");
+  Object.assign(_noSleepVideo.style, {
+    position: "fixed", left: "0", top: "0",
+    width: "1px", height: "1px", opacity: "0", pointerEvents: "none",
+  });
+  document.body.appendChild(_noSleepVideo);
+  // iOS pauses the video on interruptions (incoming call, Control Center, app
+  // switch). While we still want to stay awake, restart it whenever it pauses.
+  _noSleepVideo.addEventListener("pause", () => {
+    if (keepAwakeWanted && document.visibilityState === "visible") {
+      _noSleepVideo.play().catch(() => {});
+    }
+  });
+}
+
+// Acquire whichever keep-awake mechanism is available. enable() is async and
+// REJECTS on failure (e.g. video play() blocked) — must catch the promise, the
+// old `try { noSleep.enable() }` swallowed nothing and let failures pass silently.
 async function requestWakeLock() {
+  keepAwakeWanted = true;
   if ("wakeLock" in navigator) {
     try {
       wakeLock = await navigator.wakeLock.request("screen");
       wakeLock.addEventListener("release", () => { wakeLock = null; });
+      return;
     } catch (err) {
-      console.warn("WakeLock request failed:", err);
+      console.warn("WakeLock request failed, falling back to NoSleep:", err);
     }
+  }
+  try {
+    await noSleep.enable();
+  } catch (err) {
+    console.warn("NoSleep enable failed:", err);
   }
 }
 
 async function releaseWakeLock() {
+  keepAwakeWanted = false;
   if (wakeLock) {
     try { await wakeLock.release(); } catch (_) {}
     wakeLock = null;
@@ -113,10 +152,11 @@ async function releaseWakeLock() {
 }
 
 document.addEventListener("visibilitychange", () => {
-  // The OS auto-releases the Wake Lock when the tab is hidden; re-acquire on
-  // return if still connected. (NoSleep re-arms itself automatically.)
+  // iOS auto-releases the Wake Lock AND pauses the NoSleep video when the tab is
+  // hidden; neither re-arms on its own (v0.12.0 only re-arms the wakeLock path).
+  // Re-acquire whatever we need on return if still connected.
   if (document.visibilityState === "visible" &&
-      ws && ws.readyState === WebSocket.OPEN) {
+      keepAwakeWanted && ws && ws.readyState === WebSocket.OPEN) {
     requestWakeLock();
   }
 });
@@ -161,9 +201,9 @@ startBtn.addEventListener("click", () => {
 
   audioCtx.resume();
 
-  // Must run inside this gesture to satisfy iOS autoplay policy for the
-  // hidden keep-awake video.
-  try { noSleep.enable(); } catch (err) { console.warn("NoSleep enable failed:", err); }
+  // Must run inside this gesture to satisfy iOS autoplay policy for the hidden
+  // keep-awake video (requestWakeLock → noSleep.enable → video.play()).
+  requestWakeLock();
 
   if (useFallback) initFallback();
 
@@ -177,7 +217,10 @@ function connectWS() {
 
   ws.onopen = () => {
     setStatus("バッファリング中...");
-    requestWakeLock();
+    // Keep-awake is armed in the tap handler (gesture-bound). If a *reconnect*
+    // happened without a fresh tap, re-arm here too — by then the user has
+    // already interacted, so the gesture requirement is satisfied.
+    if (keepAwakeWanted) requestWakeLock();
   };
 
   ws.onmessage = (e) => {

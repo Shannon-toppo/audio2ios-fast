@@ -1,6 +1,6 @@
 //! Real-time Windows system audio -> iPhone Safari speaker streaming over LAN.
 //!
-//! Rust rewrite of the original Python `server.py` (audiotoios). Captures WASAPI
+//! Rust rewrite of the original Python `server.py` (audio2ios). Captures WASAPI
 //! loopback audio on a dedicated thread and broadcasts raw 16-bit PCM over a
 //! WebSocket. The Safari client (static/) is unchanged.
 //!

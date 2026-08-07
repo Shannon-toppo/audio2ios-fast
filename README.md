@@ -5,7 +5,8 @@ Windowsのシステム音声をリアルタイムでiPhoneのSafariに飛ばし�
 
 RustサーバーがWASAPIループバックで音声をキャプチャし、生PCMをWebSocketでLAN配信。
 SafariクライアントはAudioWorkletで再生します（iOS 18対策のScriptProcessorNodeフォールバック付き）。
-クライアント（`static/`）は元のPython版と完全に同一です。
+クライアント（`static/`）は元のPython版から流用したもので、ワイヤープロトコルは
+バイト互換です（iOS の画面スリープ対策まわりのみ追加修正が入っています）。
 
 ## 必要環境
 
@@ -38,7 +39,7 @@ iPhoneのSafariでそのURLを開き、「再生開始」をタップしてく�
 
 ## Python版との違い
 
-| | audiotoios (Python) | audioiosfast (Rust) |
+| | audio2ios (Python) | audio2ios-fast (Rust) |
 |---|---|---|
 | 音声キャプチャ | pyaudiowpatch | `wasapi` クレート（イベント駆動ループバック） |
 | HTTP/WebSocket | aiohttp | axum + tower-http |
@@ -46,7 +47,7 @@ iPhoneのSafariでそのURLを開き、「再生開始」をタップしてく�
 | 起動 | `python server.py` | `cargo run --release` |
 
 ネイティブコンパイルによりCPU負荷とレイテンシが下がります。配信プロトコル・チャンクサイズ・
-`/meta` のJSONはPython版とバイト互換なので、クライアントは無変更で動作します。
+`/meta` のJSONはPython版とバイト互換なので、どちらのサーバーでも同じクライアントが動作します。
 
 ## 仕組み
 
@@ -62,4 +63,7 @@ iPhone Safari ← AudioWorklet（リングバッファ＋プリロール） ← 
 
 ## ライセンス
 
-個人利用向け。
+MIT License — 詳細は [LICENSE](LICENSE) を参照してください。
+
+同梱のサードパーティコード（`static/nosleep.js` = NoSleep.js, MIT）の帰属表記は
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) にまとめています。

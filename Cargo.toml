@@ -1,8 +1,11 @@
 [package]
-name = "audioiosfast"
+name = "audio2ios-fast"
 version = "0.1.0"
 edition = "2021"
-description = "Real-time Windows system audio to iPhone Safari streaming over LAN (Rust rewrite of audiotoios)"
+description = "Real-time Windows system audio to iPhone Safari streaming over LAN (Rust rewrite of audio2ios)"
+license = "MIT"
+repository = "https://github.com/Shannon-toppo/audio2ios-fast"
+readme = "README.md"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

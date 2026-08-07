@@ -5,18 +5,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 Real-time Windows system audio → iPhone Safari speaker streaming over LAN. **Rust** rewrite of
-the Python `audiotoios` project (the sibling repo at `../audiotoios`). A Rust server captures
+the Python `audio2ios` project (https://github.com/Shannon-toppo/audio2ios, checked out as the
+sibling directory `../audiotoios` in the author's working tree). A Rust server captures
 WASAPI loopback audio via the `wasapi` crate and broadcasts raw PCM over a WebSocket. The Safari
 client plays it through AudioWorklet (with ScriptProcessorNode fallback for iOS 18 bugs).
 
-The client (`static/`) is copied verbatim from the Python version and is unchanged — the wire
-protocol is byte-compatible, so only the server was rewritten.
+The client (`static/`) started as a verbatim copy of the Python version — the wire protocol is
+byte-compatible, so only the server was rewritten. It has since diverged in one area: the iOS
+screen-wake handling in `index.html` (NoSleep `<video>` attachment, visibility re-arming).
 
 ## Commands
 
 ```bash
 cargo run --release      # Build + start server on 0.0.0.0:8080 (or PORT env var)
-cargo build --release    # Build only → target/release/audioiosfast.exe
+cargo build --release    # Build only → target/release/audio2ios-fast.exe
 cargo build              # Fast debug build for iterating
 ```
 
@@ -46,7 +48,8 @@ iPhone Safari ← AudioWorklet (ring buffer, preroll) ← Int16→Float32 ← We
   a text frame (parity with Python; the client ignores it). `static/` is served via `ServeDir`.
 
 ### Client (static/index.html + static/pcm-worklet.js)
-Identical to the Python project. See `../audiotoios/CLAUDE.md` for the full client write-up. Summary:
+Near-identical to the Python project (see the wake-lock note above). The full client write-up
+lives in the `audio2ios` repo's `CLAUDE.md`. Summary:
 - Two-phase init: preload AudioContext/Worklet on page load, `resume()` in the tap handler (iOS).
 - AudioWorklet dual-channel ring buffer with preroll; ScriptProcessorNode fallback for iOS 18.
 - `binaryType = 'arraybuffer'`, transferable ArrayBuffers (no SharedArrayBuffer in Safari).
@@ -67,4 +70,10 @@ Identical to the Python project. See `../audiotoios/CLAUDE.md` for the full clie
 - Wire format, chunk size, and `/meta` JSON are kept byte-identical so the client is untouched.
 
 ## Safari-Specific Constraints
-Same as the Python project — see `../audiotoios/CLAUDE.md`. UI strings are Japanese (target audience).
+Same as the Python project — see the `audio2ios` repo's `CLAUDE.md`. UI strings are Japanese
+(target audience).
+
+## Licensing
+MIT (`LICENSE`). `static/nosleep.js` is vendored NoSleep.js v0.12.0 (MIT, Rich Tibbett) — its
+attribution lives in `THIRD-PARTY-NOTICES.md`. Keep that file in sync if any vendored asset is
+added, updated, or patched.
